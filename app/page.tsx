@@ -1,482 +1,197 @@
 'use client';
 
-import { useState, useCallback, useRef, DragEvent, ChangeEvent } from 'react';
+import { useState, useCallback } from 'react';
 
-type Mode = 'pdf-to-docx' | 'docx-to-pdf';
-type Status = 'idle' | 'converting' | 'done' | 'error';
+import { ModeSelector }     from '@/components/ModeSelector';
+import { DropZone }         from '@/components/DropZone';
+import { JobList }          from '@/components/JobList';
+import { StatusBadge }      from '@/components/StatusBadge';
 
-const MODES: { id: Mode; label: string; from: string; to: string; accept: string; icon: string }[] = [
-  {
-    id: 'pdf-to-docx',
-    label: 'PDF → Word',
-    from: 'PDF',
-    to: 'DOCX',
-    accept: '.pdf,application/pdf',
-    icon: '📄',
-  },
-  {
-    id: 'docx-to-pdf',
-    label: 'Word → PDF',
-    from: 'DOCX',
-    to: 'PDF',
-    accept: '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    icon: '📝',
-  },
-];
+import { FORMAT_GROUPS, ALL_MODES } from '@/lib/constants';
+import { pollAndDownload }           from '@/lib/pollAndDownload';
+import type { Status, ConversionJob } from '@/lib/types';
 
-function FileIcon({ ext }: { ext: string }) {
-  return (
-    <div
-      style={{
-        background: ext === 'PDF' ? '#c4471a' : '#1a6bc4',
-        color: '#fff',
-        fontFamily: "'DM Mono', monospace",
-        fontSize: 10,
-        fontWeight: 500,
-        width: 36,
-        height: 44,
-        borderRadius: 4,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        letterSpacing: 1,
-        flexShrink: 0,
-        position: 'relative',
-      }}
-    >
-      <span
-        style={{
-          position: 'absolute',
-          top: 0,
-          right: 0,
-          width: 10,
-          height: 10,
-          background: 'rgba(255,255,255,0.25)',
-          borderBottomLeftRadius: 4,
-        }}
-      />
-      {ext}
-    </div>
-  );
-}
+/* ===================================================================
+   Page
+   =================================================================== */
 
 export default function Home() {
-  const [mode, setMode] = useState<Mode>('pdf-to-docx');
-  const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<Status>('idle');
-  const [error, setError] = useState('');
-  const [dragging, setDragging] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [mode,         setMode]         = useState(ALL_MODES[0].mode);
+  const [files,        setFiles]        = useState<File[]>([]);
+  const [jobs,         setJobs]         = useState<ConversionJob[]>([]);
+  const [globalStatus, setGlobalStatus] = useState<Status>('idle');
+  const [error,        setError]        = useState('');
+  const [dragging,     setDragging]     = useState(false);
 
-  const currentMode = MODES.find((m) => m.id === mode)!;
+  const currentMode = ALL_MODES.find((m) => m.mode === mode)!;
+  const isRunning   = globalStatus === 'queued' || globalStatus === 'processing';
+  const doneCount   = jobs.filter((j) => j.status === 'done').length;
 
-  const handleFile = useCallback(
-    (f: File) => {
-      // Basic validation
-      const isPdf = f.type === 'application/pdf' || f.name.endsWith('.pdf');
-      const isDocx =
-        f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-        f.name.endsWith('.docx');
+  /* ── File validation ── */
+  const handleFiles = useCallback((incoming: FileList | File[]) => {
+    const arr = Array.from(incoming);
+    const ext = currentMode.from.toLowerCase();
+    const valid = arr.filter(
+      (f) => f.name.toLowerCase().endsWith(`.${ext}`) ||
+             (ext === 'html' && f.name.toLowerCase().endsWith('.htm')),
+    );
+    if (!valid.length) {
+      setError(`Please upload ${currentMode.from} file(s).`);
+      return;
+    }
+    setError('');
+    setGlobalStatus('idle');
+    setJobs([]);
+    setFiles(valid);
+  }, [currentMode]);
 
-      if (mode === 'pdf-to-docx' && !isPdf) {
-        setError('Please upload a PDF file.');
-        return;
-      }
-      if (mode === 'docx-to-pdf' && !isDocx) {
-        setError('Please upload a .docx file.');
-        return;
-      }
-
-      setError('');
-      setStatus('idle');
-      setFile(f);
-    },
-    [mode]
-  );
-
-  const onDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragging(false);
-    const f = e.dataTransfer.files[0];
-    if (f) handleFile(f);
+  /* ── Per-job state update ── */
+  const updateJob = (jobId: string, status: Status, err?: string) => {
+    setJobs((prev) =>
+      prev.map((j) => j.jobId === jobId ? { ...j, status, error: err } : j),
+    );
   };
 
-  const onDragOver = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragging(true);
-  };
-
-  const onFileInput = (e: ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) handleFile(f);
-  };
-
+  /* ── Convert ── */
   const convert = async () => {
-    if (!file) return;
-    setStatus('converting');
+    if (!files.length || isRunning) return;
+    setGlobalStatus('queued');
     setError('');
 
     try {
       const fd = new FormData();
-      fd.append('file', file);
+      files.forEach((f) => fd.append('file', f));
       fd.append('mode', mode);
 
-      const res = await fetch('/api/convert', { method: 'POST', body: fd });
+      const res  = await fetch('/api/convert', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to enqueue');
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(data.error || 'Conversion failed');
-      }
+      const { jobIds } = data as { jobIds: string[] };
 
-      const blob = await res.blob();
-      const disposition = res.headers.get('Content-Disposition') ?? '';
-      const match = disposition.match(/filename="?([^"]+)"?/);
-      const filename = match?.[1] ?? (mode === 'pdf-to-docx' ? 'output.docx' : 'output.pdf');
+      const initialJobs: ConversionJob[] = jobIds.map((jobId, i) => ({
+        jobId,
+        filename: files[i]?.name ?? jobId,
+        status: 'queued',
+      }));
+      setJobs(initialJobs);
+      setGlobalStatus('processing');
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
+      await Promise.all(
+        jobIds.map((jobId) =>
+          pollAndDownload(jobId, (status, err) => updateJob(jobId, status, err)),
+        ),
+      );
 
-      setStatus('done');
+      setGlobalStatus('done');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
-      setStatus('error');
+      const msg = err instanceof Error ? err.message : 'Something went wrong';
+      setError(msg);
+      setGlobalStatus('error');
     }
   };
 
+  /* ── Reset ── */
   const reset = () => {
-    setFile(null);
-    setStatus('idle');
+    setFiles([]);
+    setJobs([]);
+    setGlobalStatus('idle');
     setError('');
-    if (inputRef.current) inputRef.current.value = '';
   };
 
-  const switchMode = (m: Mode) => {
-    setMode(m);
-    reset();
-  };
+  const switchMode = (m: string) => { setMode(m); reset(); };
 
+  /* ===================================================================
+     Render
+     =================================================================== */
   return (
-    <main
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '2rem 1rem',
-        background: 'var(--paper)',
-      }}
-    >
-      {/* Header */}
-      <div
-        className="animate-fade-up"
-        style={{ textAlign: 'center', marginBottom: '2.5rem' }}
-      >
-        <div
-          style={{
-            fontFamily: "'Fraunces', serif",
-            fontSize: 'clamp(2rem, 5vw, 3.5rem)',
-            fontWeight: 600,
-            color: 'var(--ink)',
-            lineHeight: 1.1,
-            letterSpacing: '-0.02em',
-          }}
-        >
+    <main className="min-h-screen flex flex-col items-center justify-center px-4 py-8 bg-paper">
+
+      {/* ── Header ── */}
+      <header className="animate-fade-up text-center mb-10">
+        <h1 className="font-serif text-[clamp(2rem,5vw,3.5rem)] font-semibold text-ink leading-[1.1] tracking-[-0.02em]">
           DocConverter
-        </div>
-        <p
-          style={{
-            fontFamily: "'DM Mono', monospace",
-            fontSize: 13,
-            color: 'var(--muted)',
-            marginTop: '0.5rem',
-            letterSpacing: '0.05em',
-          }}
-        >
-          PDF ↔ DOCX — runs on your server, files never leave
+        </h1>
+        <p className="font-mono text-[13px] text-muted mt-2 tracking-[0.05em]">
+          PDF · DOCX · PPTX · HTML · EPUB — runs on your server
         </p>
-      </div>
+      </header>
 
-      {/* Card */}
+      {/* ── Card ── */}
       <div
-        className="animate-fade-up"
-        style={{
-          width: '100%',
-          maxWidth: 520,
-          background: '#fff',
-          borderRadius: 16,
-          border: '1px solid var(--border)',
-          boxShadow: '0 4px 40px rgba(26,20,18,0.06)',
-          overflow: 'hidden',
-          animationDelay: '0.1s',
-        }}
+        className="animate-fade-up w-full max-w-[560px] bg-white rounded-2xl border border-border shadow-card overflow-hidden"
+        style={{ animationDelay: '0.1s' }}
       >
-        {/* Mode tabs */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            borderBottom: '1px solid var(--border)',
-          }}
-        >
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              onClick={() => switchMode(m.id)}
-              style={{
-                padding: '1rem',
-                fontFamily: "'DM Mono', monospace",
-                fontSize: 13,
-                fontWeight: mode === m.id ? 500 : 400,
-                color: mode === m.id ? 'var(--rust)' : 'var(--muted)',
-                background: mode === m.id ? 'rgba(196,71,26,0.05)' : 'transparent',
-                border: 'none',
-                borderBottom: mode === m.id ? '2px solid var(--rust)' : '2px solid transparent',
-                cursor: 'pointer',
-                transition: 'all 0.15s',
-                letterSpacing: '0.04em',
-              }}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
+        <ModeSelector groups={FORMAT_GROUPS} activeMode={mode} onSelect={switchMode} />
 
-        {/* Body */}
-        <div style={{ padding: '1.75rem' }}>
-          {/* Drop zone */}
-          <div
-            className={`drop-zone${dragging ? ' active' : ''}`}
-            onClick={() => inputRef.current?.click()}
-            onDrop={onDrop}
-            onDragOver={onDragOver}
-            onDragLeave={() => setDragging(false)}
-            style={{
-              borderRadius: 10,
-              padding: '2rem 1.5rem',
-              textAlign: 'center',
-              cursor: 'pointer',
-              userSelect: 'none',
-              background: dragging ? 'rgba(196,71,26,0.04)' : 'var(--cream)',
-            }}
-          >
-            <input
-              ref={inputRef}
-              type="file"
-              accept={currentMode.accept}
-              onChange={onFileInput}
-              style={{ display: 'none' }}
-            />
+        <div className="p-6">
 
-            {file ? (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 12,
-                  justifyContent: 'center',
-                }}
-              >
-                <FileIcon ext={currentMode.from} />
-                <div style={{ textAlign: 'left' }}>
-                  <div
-                    style={{
-                      fontFamily: "'DM Mono', monospace",
-                      fontSize: 13,
-                      fontWeight: 500,
-                      color: 'var(--ink)',
-                      maxWidth: 260,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {file.name}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                    {(file.size / 1024).toFixed(1)} KB · click to change
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div>
-                <div style={{ fontSize: 32, marginBottom: 8 }}>{currentMode.icon}</div>
-                <div
-                  style={{
-                    fontFamily: "'DM Mono', monospace",
-                    fontSize: 13,
-                    color: 'var(--muted)',
-                  }}
-                >
-                  Drop your <strong style={{ color: 'var(--ink)' }}>.{currentMode.from.toLowerCase()}</strong>{' '}
-                  here or{' '}
-                  <span style={{ color: 'var(--rust)', textDecoration: 'underline' }}>
-                    browse
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
+          <DropZone
+            currentMode={currentMode}
+            files={files}
+            dragging={dragging}
+            onFiles={handleFiles}
+            onDragStart={() => setDragging(true)}
+            onDragEnd={() => setDragging(false)}
+          />
 
-          {/* Error */}
-          {error && (
-            <div
-              style={{
-                marginTop: '1rem',
-                padding: '0.75rem 1rem',
-                background: 'rgba(196,71,26,0.08)',
-                border: '1px solid rgba(196,71,26,0.2)',
-                borderRadius: 8,
-                fontFamily: "'DM Mono', monospace",
-                fontSize: 12,
-                color: 'var(--rust)',
-              }}
-            >
-              ⚠ {error}
-            </div>
-          )}
+          <JobList jobs={jobs} />
 
-          {/* Success */}
-          {status === 'done' && (
-            <div
-              style={{
-                marginTop: '1rem',
-                padding: '0.75rem 1rem',
-                background: 'rgba(22,120,50,0.07)',
-                border: '1px solid rgba(22,120,50,0.2)',
-                borderRadius: 8,
-                fontFamily: "'DM Mono', monospace",
-                fontSize: 12,
-                color: '#167832',
-              }}
-            >
-              ✓ Conversion complete — file downloaded
-            </div>
-          )}
+          {error && <StatusBadge status="error" error={error} />}
 
-          {/* Convert button */}
-          <div style={{ display: 'flex', gap: 10, marginTop: '1.25rem' }}>
+          {/* ── Action buttons ── */}
+          <div className="flex gap-2.5 mt-5">
             <button
               onClick={convert}
-              disabled={!file || status === 'converting'}
-              style={{
-                flex: 1,
-                padding: '0.85rem 1.5rem',
-                background: file && status !== 'converting' ? 'var(--rust)' : 'var(--border)',
-                color: file && status !== 'converting' ? '#fff' : 'var(--muted)',
-                border: 'none',
-                borderRadius: 8,
-                fontFamily: "'DM Mono', monospace",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: file && status !== 'converting' ? 'pointer' : 'not-allowed',
-                transition: 'background 0.15s, transform 0.1s',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                letterSpacing: '0.04em',
-              }}
-              onMouseDown={(e) => {
-                if (file) (e.currentTarget as HTMLButtonElement).style.transform = 'scale(0.98)';
-              }}
-              onMouseUp={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)';
-              }}
+              disabled={!files.length || isRunning}
+              aria-busy={isRunning}
+              className={[
+                'flex-1 flex items-center justify-center gap-2',
+                'py-3.5 px-6 rounded-lg font-mono text-[13px] font-medium tracking-[0.04em]',
+                'transition-colors duration-150',
+                files.length && !isRunning
+                  ? 'bg-rust text-white cursor-pointer hover:bg-rust/90'
+                  : 'bg-border text-muted cursor-not-allowed',
+              ].join(' ')}
             >
-              {status === 'converting' ? (
+              {isRunning ? (
                 <>
-                  <span
-                    className="animate-spin-slow"
-                    style={{ display: 'inline-block', fontSize: 14 }}
-                  >
-                    ⟳
-                  </span>
-                  Converting…
+                  <span className="animate-spin-slow inline-block" aria-hidden="true">⟳</span>
+                  Converting {doneCount}/{jobs.length}…
                 </>
               ) : (
-                `Convert to ${currentMode.to}`
+                `Convert to ${currentMode.to}${files.length > 1 ? ` (${files.length} files)` : ''}`
               )}
             </button>
 
-            {file && (
+            {(files.length > 0 || jobs.length > 0) && (
               <button
                 onClick={reset}
-                style={{
-                  padding: '0.85rem 1rem',
-                  background: 'transparent',
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  fontFamily: "'DM Mono', monospace",
-                  fontSize: 12,
-                  color: 'var(--muted)',
-                  cursor: 'pointer',
-                }}
+                className="px-4 py-3.5 bg-transparent border border-border rounded-lg font-mono text-xs text-muted cursor-pointer hover:border-muted transition-colors duration-150"
               >
                 Clear
               </button>
             )}
           </div>
 
-          {/* Arrow indicator */}
-          <div
-            style={{
-              marginTop: '1.25rem',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 12,
-              fontFamily: "'DM Mono', monospace",
-              fontSize: 11,
-              color: 'var(--muted)',
-              letterSpacing: '0.08em',
-            }}
-          >
-            <span
-              style={{
-                padding: '2px 8px',
-                background: 'var(--cream)',
-                borderRadius: 4,
-                color: 'var(--ink)',
-                fontWeight: 500,
-              }}
-            >
-              {currentMode.from}
-            </span>
-            <span>——→</span>
-            <span
-              style={{
-                padding: '2px 8px',
-                background: 'var(--cream)',
-                borderRadius: 4,
-                color: 'var(--ink)',
-                fontWeight: 500,
-              }}
-            >
-              {currentMode.to}
-            </span>
+          {/* ── Format pill indicator ── */}
+          <div className="flex items-center justify-center gap-3 mt-5 font-mono text-[11px] text-muted tracking-[0.08em]">
+            {[currentMode.from, '——→', currentMode.to].map((s, i) =>
+              s === '——→'
+                ? <span key={i} aria-hidden="true">{s}</span>
+                : <span key={i} className="px-2 py-0.5 bg-cream rounded text-ink font-medium">{s}</span>,
+            )}
           </div>
         </div>
       </div>
 
-      {/* Footer */}
-      <p
-        className="animate-fade-up"
-        style={{
-          marginTop: '2rem',
-          fontFamily: "'DM Mono', monospace",
-          fontSize: 11,
-          color: 'var(--muted)',
-          letterSpacing: '0.05em',
-          animationDelay: '0.2s',
-        }}
+      {/* ── Footer ── */}
+      <footer
+        className="animate-fade-up mt-8 font-mono text-[11px] text-muted tracking-[0.05em]"
+        style={{ animationDelay: '0.2s' }}
       >
-        Powered by LibreOffice & Pandoc · Files processed locally
-      </p>
+        Powered by LibreOffice &amp; Pandoc · Files processed locally
+      </footer>
     </main>
   );
 }

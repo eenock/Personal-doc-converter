@@ -1,41 +1,30 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design tokens ────────────────────────────────────────────────── */
 :root {
-  --ink: #1a1412;
-  --paper: #f5f0e8;
-  --cream: #ede7d9;
-  --rust: #c4471a;
+  --ink:        #1a1412;
+  --paper:      #f5f0e8;
+  --cream:      #ede7d9;
+  --rust:       #c4471a;
   --rust-light: #e8b89a;
-  --muted: #7a6f65;
-  --border: #d4c9b8;
+  --muted:      #7a6f65;
+  --border:     #d4c9b8;
 }
 
-* { box-sizing: border-box; }
+/* ─── Base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
 
 body {
   background: var(--paper);
   color: var(--ink);
-  font-family: 'DM Mono', monospace;
+  /* next/font injects --font-mono via the html element class */
+  font-family: var(--font-mono), ui-monospace, monospace;
   margin: 0;
 }
 
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(16px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.animate-fade-up { animation: fadeUp 0.5s ease both; }
-.animate-spin-slow { animation: spin 1s linear infinite; }
-
-/* Drop zone */
+/* ─── Drop zone ────────────────────────────────────────────────────── */
 .drop-zone {
   border: 2px dashed var(--border);
   transition: border-color 0.2s, background 0.2s;
@@ -43,4 +32,8 @@ body {
 .drop-zone.active {
   border-color: var(--rust);
   background: rgba(196, 71, 26, 0.04);
+}
+.drop-zone:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 2px;
 }
